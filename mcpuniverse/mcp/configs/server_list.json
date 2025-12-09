@@ -338,12 +338,44 @@
     }
   },
 
+  "bilibili-video-tool": {
+    "stdio": {
+      "command": "python3",
+      "args": [
+        "-m", "mcpuniverse.mcp.servers.bilibili_video_tool"
+      ]
+    },
+    "sse": {
+      "command": "python3",
+      "args": [
+        "-m", "mcpuniverse.mcp.servers.bilibili_video_tool",
+        "--transport", "sse",
+        "--port", "{{PORT}}"
+      ]
+    },
+    "env": {
+      "BILIBILI_FILE_PATH": "{{BILIBILI_FILE_PATH}}",
+      "BILIBILI_SESSDATA": "{{BILIBILI_SESSDATA}}"
+    }
+  },
+
   "video-editing": {
     "stdio": {
       "command": "python3",
       "args": [
         "-m", "mcpuniverse.mcp.servers.video_editing"
       ]
+    },
+    "sse": {
+      "command": "python3",
+      "args": [
+        "-m", "mcpuniverse.mcp.servers.video_editing",
+        "--transport", "sse",
+        "--port", "{{PORT}}"
+      ]
+    },
+    "env": {
+      "VIDEO_EDITING_OUTPUT_DIR": "{{VIDEO_EDITING_OUTPUT_DIR}}"
     }
   }
 }
