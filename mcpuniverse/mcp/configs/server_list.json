@@ -336,5 +336,14 @@
         "https://mcp.paypal.com/sse"
       ]
     }
+  },
+
+  "video-editing": {
+    "stdio": {
+      "command": "python3",
+      "args": [
+        "-m", "mcpuniverse.mcp.servers.video_editing"
+      ]
+    }
   }
 }

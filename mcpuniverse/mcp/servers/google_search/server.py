@@ -85,11 +85,11 @@ async def _google_lens_search(
         "url": image_url,
         "type": search_type,
     }
-    
+
     # Add query parameter if provided and type supports it
     if query and search_type in ["all", "visual_matches", "products"]:
         params["q"] = query
-    
+
     async with httpx.AsyncClient() as client:
         response = await client.get(SERP_API_BASE, params=params, timeout=timeout)
         response.raise_for_status()
