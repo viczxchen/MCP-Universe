@@ -1,13 +1,17 @@
 """
 An MCP server for Bilibili video operations
 """
-import os
+import hashlib
 import json
+import os
 import re
-import click
-import httpx
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
+from urllib.parse import unquote, urlencode
+
+import click
+import httpx
 from mcp.server.fastmcp import FastMCP
 from mcpuniverse.common.logger import get_logger
 
@@ -19,11 +23,16 @@ BILIBILI_SEARCH_API = "https://api.bilibili.com/x/web-interface/search/all/v2"  
 BILIBILI_SEARCH_WBI_API = "https://api.bilibili.com/x/web-interface/wbi/search/all/v2"  # New API with WBI signature
 BILIBILI_COMMENTS_API = "https://api.bilibili.com/x/v2/reply"
 BILIBILI_SUBTITLES_API = "https://api.bilibili.com/x/player/v2"
+BILIBILI_SUBTITLES_WBI_API = "https://api.bilibili.com/x/player/wbi/v2"
 BILIBILI_HOME_URL = "https://www.bilibili.com"
 
 # Default headers for Bilibili API requests
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
     "Referer": "https://www.bilibili.com"
 }
 
@@ -42,6 +51,24 @@ QUALITY_MAP = {
 }
 
 
+def get_sessdata() -> Optional[str]:
+    """
+    Get and decode SESSDATA from environment variable.
+
+    Returns:
+        Decoded SESSDATA string, or None if not set
+    """
+    sessdata = os.environ.get("BILIBILI_SESSDATA")
+    if sessdata:
+        try:
+            # Decode URL-encoded SESSDATA if needed
+            sessdata = unquote(sessdata)
+        except Exception:
+            # If decoding fails, use original value
+            pass
+    return sessdata
+
+
 def parse_video_id(video_id: str) -> Tuple[Optional[str], Optional[int]]:
     """
     Parse video ID to extract bvid and aid.
@@ -52,14 +79,15 @@ def parse_video_id(video_id: str) -> Tuple[Optional[str], Optional[int]]:
     Returns:
         Tuple of (bvid, aid)
     """
-    video_id = video_id.strip().upper()
+    video_id = video_id.strip()
 
-    # Check if it's a BV number
-    if video_id.startswith("BV"):
+    # Check if it's a BV number (keep original case, BV numbers are Base58 encoded)
+    if video_id.upper().startswith("BV"):
+        # Keep original case for BV numbers
         return video_id, None
 
-    # Check if it's an AV number
-    if video_id.startswith("AV"):
+    # Check if it's an AV number (case insensitive)
+    if video_id.upper().startswith("AV"):
         aid = int(video_id[2:])
         return None, aid
 
@@ -68,14 +96,18 @@ def parse_video_id(video_id: str) -> Tuple[Optional[str], Optional[int]]:
         aid = int(video_id)
         return None, aid
     except ValueError:
-        # If it looks like a BV number without prefix
-        if re.match(r'^[A-Z0-9]{10}$', video_id):
+        # If it looks like a BV number without prefix (case insensitive check)
+        if re.match(r'^[A-Za-z0-9]{10}$', video_id, re.IGNORECASE):
             return f"BV{video_id}", None
 
     return None, None
 
 
-async def get_video_info(bvid: Optional[str] = None, aid: Optional[int] = None, sessdata: Optional[str] = None) -> Dict[str, Any]:
+async def get_video_info(
+    bvid: Optional[str] = None,
+    aid: Optional[int] = None,
+    sessdata: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Get video information including cid.
 
@@ -115,7 +147,13 @@ async def get_video_info(bvid: Optional[str] = None, aid: Optional[int] = None, 
         data = response.json()
 
         if data.get("code") != 0:
-            raise ValueError(f"Failed to get video info: {data.get('message', 'Unknown error')}")
+            error_msg = data.get('message', 'Unknown error')
+            logger_instance = get_logger("bilibili-video-tool")
+            logger_instance.error(
+                "Bilibili API error: code=%s, message=%s, params=%s",
+                data.get("code"), error_msg, params
+            )
+            raise ValueError(f"Failed to get video info: {error_msg}")
 
         return data.get("data", {})
 
@@ -241,32 +279,54 @@ async def get_video_comments(
 
 
 async def get_video_subtitles(
-    bvid: str,
+    bvid: str,  # pylint: disable=unused-argument
     cid: int,
+    aid: Optional[int] = None,
     sessdata: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Get subtitles for a Bilibili video.
+    Get subtitles for a Bilibili video using WBI signed API.
 
     Args:
         bvid: Bilibili video ID
         cid: Content ID
+        aid: Article ID (AV number), required for wbi API
         sessdata: Optional SESSDATA cookie for authentication
 
     Returns:
         Subtitles data dictionary
     """
+    if not aid:
+        raise ValueError("aid is required for WBI API")
+
+    # Get WBI keys and generate signature
+    img_key, sub_key = await get_wbi_keys()
+
+    # Prepare parameters for WBI API
     params = {
-        "bvid": bvid,
+        "aid": aid,
         "cid": cid
     }
 
-    headers = DEFAULT_HEADERS.copy()
-    if sessdata:
-        headers["Cookie"] = f"SESSDATA={sessdata}"
+    # Generate WBI signature
+    params = enc_wbi(params, img_key, sub_key)
 
-    async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
-        response = await client.get(BILIBILI_SUBTITLES_API, params=params)
+    # Get base cookies first to avoid -412 error
+    base_cookies = await get_bilibili_cookies()
+
+    # Merge with SESSDATA if provided
+    cookies = base_cookies.copy()
+    if sessdata:
+        cookies["SESSDATA"] = sessdata
+
+    # Build cookie string
+    cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+
+    headers = DEFAULT_HEADERS.copy()
+    headers["Cookie"] = cookie_str
+
+    async with httpx.AsyncClient(headers=headers, cookies=cookies, timeout=30.0) as client:
+        response = await client.get(BILIBILI_SUBTITLES_WBI_API, params=params)
         response.raise_for_status()
         data = response.json()
 
@@ -281,11 +341,15 @@ async def download_subtitle_file(subtitle_url: str) -> Dict[str, Any]:
     Download subtitle file from URL.
 
     Args:
-        subtitle_url: Subtitle file URL
+        subtitle_url: Subtitle file URL (may start with //, need to add https:)
 
     Returns:
         Parsed subtitle data
     """
+    # Add https: prefix if URL starts with //
+    if subtitle_url.startswith("//"):
+        subtitle_url = "https:" + subtitle_url
+
     headers = DEFAULT_HEADERS.copy()
 
     async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
@@ -379,6 +443,84 @@ async def get_bilibili_cookies() -> Dict[str, str]:
             cookies[cookie.name] = cookie.value
 
         return cookies
+
+
+async def get_wbi_keys() -> Tuple[str, str]:
+    """
+    Get WBI keys (img_key and sub_key) from Bilibili nav API.
+
+    Returns:
+        Tuple of (img_key, sub_key)
+    """
+    async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=30.0) as client:
+        response = await client.get("https://api.bilibili.com/x/web-interface/nav")
+        response.raise_for_status()
+        data = response.json()
+
+        wbi_img = data.get("data", {}).get("wbi_img", {})
+        img_url = wbi_img.get("img_url", "")
+        sub_url = wbi_img.get("sub_url", "")
+
+        # Extract keys from URLs
+        img_key = img_url.split("/")[-1].split(".")[0] if img_url else ""
+        sub_key = sub_url.split("/")[-1].split(".")[0] if sub_url else ""
+
+        return img_key, sub_key
+
+
+def get_mixin_key(orig: str) -> str:
+    """
+    Generate mixin key from original key using Bilibili's algorithm.
+
+    Args:
+        orig: Original key string (img_key + sub_key)
+
+    Returns:
+        Mixin key string
+    """
+    mixin_key_enc_tab = [
+        46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+        27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+        37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
+        22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52
+    ]
+    return ''.join([orig[i] for i in mixin_key_enc_tab])[:32]
+
+
+def enc_wbi(params: Dict[str, Any], img_key: str, sub_key: str) -> Dict[str, Any]:
+    """
+    Generate WBI signature for Bilibili API request.
+
+    Args:
+        params: Request parameters dictionary
+        img_key: Image key from WBI
+        sub_key: Sub key from WBI
+
+    Returns:
+        Parameters dictionary with wts and w_rid added
+    """
+    mixin_key = get_mixin_key(img_key + sub_key)
+    curr_time = round(time.time())
+
+    # Add timestamp
+    params = params.copy()
+    params['wts'] = curr_time
+
+    # Sort parameters
+    params = dict(sorted(params.items()))
+
+    # Filter special characters
+    params = {
+        k: ''.join(filter(lambda x: x not in "!'()*", str(v)))
+        for k, v in params.items()
+    }
+
+    # Generate signature
+    query = urlencode(params)
+    wbi_sign = hashlib.md5((query + mixin_key).encode()).hexdigest()
+    params['w_rid'] = wbi_sign
+
+    return params
 
 
 async def search_bilibili(keyword: str) -> Dict[str, Any]:
@@ -505,13 +647,20 @@ def build_server(port: int) -> FastMCP:
             search_data = await search_bilibili(keyword)
 
             # Debug: log the structure
-            logger.debug("Search data keys: %s", list(search_data.keys()) if isinstance(search_data, dict) else "Not a dict")
+            logger.debug(
+                "Search data keys: %s",
+                list(search_data.keys()) if isinstance(search_data, dict) else "Not a dict"
+            )
 
             # Extract results - check the actual structure
             results = search_data.get("result", [])
 
             # Log for debugging
-            logger.debug("Result type: %s, Result length: %s", type(results), len(results) if isinstance(results, list) else "N/A")
+            logger.debug(
+                "Result type: %s, Result length: %s",
+                type(results),
+                len(results) if isinstance(results, list) else "N/A"
+            )
 
             # If result is not a list, handle different cases
             if not isinstance(results, list):
@@ -628,7 +777,7 @@ def build_server(port: int) -> FastMCP:
                 }, ensure_ascii=False)
 
             # Get SESSDATA from environment if available
-            sessdata = os.environ.get("BILIBILI_SESSDATA")
+            sessdata = get_sessdata()
 
             # Get video information
             video_info = await get_video_info(bvid=bvid, aid=aid, sessdata=sessdata)
@@ -691,7 +840,13 @@ def build_server(port: int) -> FastMCP:
             else:
                 # If BILIBILI_FILE_PATH is a directory, append filename
                 output_dir = Path(output_path)
-                if output_dir.is_dir() or (not output_path.endswith('.mp4') and not output_path.endswith('/') and not output_path.endswith('\\')):
+                is_dir_or_no_ext = (
+                    output_dir.is_dir() or
+                    (not output_path.endswith('.mp4') and
+                     not output_path.endswith('/') and
+                     not output_path.endswith('\\'))
+                )
+                if is_dir_or_no_ext:
                     # It's a directory or doesn't have extension, append filename
                     safe_title = re.sub(r'[^\w\s-]', '', title).strip()
                     safe_title = re.sub(r'[-\s]+', '-', safe_title)
@@ -754,7 +909,10 @@ def build_server(port: int) -> FastMCP:
             JSON string containing comments data.
         """
         try:
-            logger.info("Getting comments for video %s, page: %s, page_size: %s, sort: %s", video_id, page, page_size, sort)
+            logger.info(
+                "Getting comments for video %s, page: %s, page_size: %s, sort: %s",
+                video_id, page, page_size, sort
+            )
 
             # Parse video ID to get aid
             bvid, aid = parse_video_id(video_id)
@@ -771,7 +929,7 @@ def build_server(port: int) -> FastMCP:
                 }, ensure_ascii=False)
 
             # Get SESSDATA from environment if available
-            sessdata = os.environ.get("BILIBILI_SESSDATA")
+            sessdata = get_sessdata()
 
             # Get comments
             comments_data = await get_video_comments(
@@ -834,30 +992,53 @@ def build_server(port: int) -> FastMCP:
             }, ensure_ascii=False)
 
     @mcp.tool()
-    async def get_subtitles(video_id: str, language: str = "zh-CN", subtitle_format: str = "srt") -> str:
+    async def get_subtitles(video_id: str, language: str = "auto", subtitle_format: str = "srt") -> str:
         """
         Get subtitles/captions for a Bilibili video.
 
         Args:
             video_id: The Bilibili video ID (BV number or AV number).
-            language: Subtitle language code (default: "zh-CN" for Chinese).
+            language: Subtitle language code or name
+                     (e.g., "zh-CN", "en-US", "ai-zh", "中文", "英语（美国）").
+                     Use "auto" or empty string to auto-select
+                     (default: "auto", prefers Chinese).
             subtitle_format: Subtitle format - "srt", "vtt", or "json" (default: "srt").
 
         Returns:
             JSON string containing subtitle data or subtitle file content.
+            The response includes available_languages list showing all available subtitle languages.
         """
         try:
             logger.info("Getting subtitles for video %s, language: %s, format: %s", video_id, language, subtitle_format)
 
             # Parse video ID
             bvid, aid = parse_video_id(video_id)
+            logger.info("Parsed video ID: bvid=%s, aid=%s", bvid, aid)
 
-            # Get video information to get cid
-            video_info = await get_video_info(bvid=bvid, aid=aid)
+            # Get SESSDATA from environment if available
+            sessdata = get_sessdata()
+            logger.info("SESSDATA available: %s", "Yes" if sessdata else "No")
+            if sessdata:
+                logger.info("SESSDATA length: %d, first 20 chars: %s", len(sessdata), sessdata[:20])
+
+            # Get video information to get cid (with SESSDATA for login-required videos)
+            try:
+                video_info = await get_video_info(bvid=bvid, aid=aid, sessdata=sessdata)
+            except Exception as e:
+                logger.error("Failed to get video info: %s", str(e))
+                raise
 
             # Use bvid if available, otherwise get from video_info
             if not bvid:
                 bvid = video_info.get("bvid")
+
+            # Get aid (required for wbi API)
+            aid = video_info.get("aid")
+            if not aid:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Failed to get video aid"
+                }, ensure_ascii=False)
 
             # Get first page's cid (for multi-part videos, use first part)
             pages = video_info.get("pages", [])
@@ -874,13 +1055,11 @@ def build_server(port: int) -> FastMCP:
                     "message": "Failed to get video cid"
                 }, ensure_ascii=False)
 
-            # Get SESSDATA from environment if available
-            sessdata = os.environ.get("BILIBILI_SESSDATA")
-
-            # Get subtitles
+            # Get subtitles using wbi API with aid and cid
             subtitles_data = await get_video_subtitles(
                 bvid=bvid,
                 cid=cid,
+                aid=aid,
                 sessdata=sessdata
             )
 
@@ -898,17 +1077,77 @@ def build_server(port: int) -> FastMCP:
                     "subtitles": []
                 }, ensure_ascii=False)
 
-            # Find subtitle by language (default to first one if not found)
+            # Find subtitle by language
             selected_subtitle = None
-            for subtitle in subtitles_list:
-                if subtitle.get("lan") == language or subtitle.get("lan_doc") == language:
-                    selected_subtitle = subtitle
-                    break
 
-            if not selected_subtitle:
-                # Use first subtitle if language not found
-                selected_subtitle = subtitles_list[0]
-                logger.warning("Language %s not found, using %s", language, selected_subtitle.get("lan_doc", "default"))
+            # Normalize language parameter (case-insensitive)
+            language_lower = language.lower().strip() if language else ""
+
+            # If language is empty or "auto", use default preference
+            if not language_lower or language_lower == "auto":
+                # Default: prefer ai-zh or zh
+                for subtitle in subtitles_list:
+                    if subtitle.get("lan") in ["ai-zh", "zh"]:
+                        selected_subtitle = subtitle
+                        logger.info("Auto-selected language: %s", subtitle.get("lan_doc", subtitle.get("lan")))
+                        break
+                # If no ai-zh or zh, use first available
+                if not selected_subtitle:
+                    selected_subtitle = subtitles_list[0]
+                    logger.info(
+                        "Auto-selected first available language: %s",
+                        selected_subtitle.get("lan_doc", "default")
+                    )
+            else:
+                # Try exact match by language code (case-insensitive)
+                for subtitle in subtitles_list:
+                    if subtitle.get("lan", "").lower() == language_lower:
+                        selected_subtitle = subtitle
+                        logger.info("Found exact match by code: %s", subtitle.get("lan_doc", subtitle.get("lan")))
+                        break
+
+                # Try exact match by language name (case-insensitive)
+                if not selected_subtitle:
+                    for subtitle in subtitles_list:
+                        if subtitle.get("lan_doc", "").lower() == language_lower:
+                            selected_subtitle = subtitle
+                            logger.info("Found exact match by name: %s", subtitle.get("lan_doc", subtitle.get("lan")))
+                            break
+
+                # Try partial match (e.g., "en" matches "en-US", "zh" matches "zh-Hans", "ai-zh")
+                if not selected_subtitle:
+                    for subtitle in subtitles_list:
+                        sub_lan = subtitle.get("lan", "").lower()
+                        sub_lan_doc = subtitle.get("lan_doc", "").lower()
+                        # Check if language parameter is a prefix of language code or name
+                        if (sub_lan.startswith(language_lower) or
+                                language_lower.startswith(sub_lan) or
+                                sub_lan_doc.startswith(language_lower) or
+                                language_lower in sub_lan_doc):
+                            selected_subtitle = subtitle
+                            logger.info("Found partial match: %s", subtitle.get("lan_doc", subtitle.get("lan")))
+                            break
+
+                # If still not found, return error with available languages
+                if not selected_subtitle:
+                    available_langs = [
+                        f"{sub.get('lan_doc', '')} ({sub.get('lan', '')})"
+                        for sub in subtitles_list
+                    ]
+                    return json.dumps({
+                        "status": "error",
+                        "message": (
+                            f"Language '{language}' not found. "
+                            f"Available languages: {', '.join(available_langs)}"
+                        ),
+                        "available_languages": [
+                            {
+                                "code": sub.get("lan", ""),
+                                "name": sub.get("lan_doc", "")
+                            }
+                            for sub in subtitles_list
+                        ]
+                    }, ensure_ascii=False)
 
             # Download subtitle file
             subtitle_url = selected_subtitle.get("subtitle_url", "")
