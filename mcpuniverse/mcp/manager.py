@@ -52,7 +52,6 @@ class MCPManager(metaclass=AutodocABCMeta):
             context (Context, optional): The context information, e.g., environment variables or metadata.
         """
         self._server_configs: Dict[str, ServerConfig] = {}
-        self._raw_configs: Dict[str, Dict] = {}  # Store raw configs for re-rendering
         self._logger = get_logger(self.__class__.__name__)
         self.load_configs(config)
         # Set params defined in the environment variables
@@ -89,11 +88,8 @@ class MCPManager(metaclass=AutodocABCMeta):
             configs = MCPManager._open_config(config)
 
         self._server_configs = {}
-        self._raw_configs = {}  # Store raw configs
         for name, conf in configs.items():
             try:
-                # Store raw config before creating ServerConfig
-                self._raw_configs[name] = copy.deepcopy(conf)
                 self._server_configs[name] = ServerConfig.from_dict(copy.deepcopy(conf))
             except Exception as e:
                 self._logger.error("Failed to load config of server `%s`: %s", name, str(e))
@@ -207,28 +203,7 @@ class MCPManager(metaclass=AutodocABCMeta):
         """
         assert transport in ["stdio", "sse"], "Transport type should be `stdio` or `sse`"
         assert server_name in self._server_configs, f"Unknown server: {server_name}"
-
-        # Re-create config from raw config to ensure we always use the latest environment variables
-        # This is critical because the original config may have been rendered with old environment variables
-        # during initialization. By recreating from raw config, we ensure template variables are fresh
-        # and will be rendered with current environment variable values.
-        if server_name in self._raw_configs:
-            # Re-create ServerConfig from raw config to get fresh template
-            server_config = ServerConfig.from_dict(copy.deepcopy(self._raw_configs[server_name]))
-        else:
-            # Fallback to deep copy if raw config not available (shouldn't happen in normal operation)
-            self._logger.warning(
-                "Raw config not found for server %s, using rendered config. "
-                "This may result in stale environment variable values.",
-                server_name
-            )
-            server_config = copy.deepcopy(self._server_configs[server_name])
-
-        # Re-render template with current environment variables
-        # This ensures that any environment variables updated during task preparation
-        # are properly reflected in the server configuration
-        server_config.render_template(params=None)
-
+        server_config = self._server_configs[server_name]
         if transport == "stdio":
             if server_config.stdio.list_unspecified_params():
                 raise RuntimeError(f"Server {server_name} has unspecified parameters: "
