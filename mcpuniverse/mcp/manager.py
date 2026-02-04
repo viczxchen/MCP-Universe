@@ -213,13 +213,19 @@ class MCPManager(metaclass=AutodocABCMeta):
         if transport == "stdio":
             await client.connect_to_stdio_server(server_config, timeout=timeout)
         else:
-            if mcp_gateway_address:
-                gateway_address = mcp_gateway_address
+            # Check if server_config has a direct SSE address (for containerized servers)
+            if hasattr(server_config, 'sse_address') and server_config.sse_address:
+                # Use direct SSE URL (e.g., from containerized MCP server)
+                await client.connect_to_sse_server(server_config.sse_address, timeout=timeout)
             else:
-                gateway_address = os.environ.get("MCP_GATEWAY_ADDRESS", "")
-            if gateway_address == "":
-                raise ValueError("MCP_GATEWAY_ADDRESS is not set")
-            await client.connect_to_sse_server(f"{gateway_address}/{server_name}/sse")
+                # Fall back to gateway-based connection (original behavior)
+                if mcp_gateway_address:
+                    gateway_address = mcp_gateway_address
+                else:
+                    gateway_address = os.environ.get("MCP_GATEWAY_ADDRESS", "")
+                if gateway_address == "":
+                    raise ValueError("MCP_GATEWAY_ADDRESS is not set and no sse_address provided")
+                await client.connect_to_sse_server(f"{gateway_address}/{server_name}/sse", timeout=timeout)
         return client
 
     async def execute(

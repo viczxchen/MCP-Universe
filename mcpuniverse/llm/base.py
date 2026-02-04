@@ -44,15 +44,17 @@ class BaseLLM(ExportConfigMixin, metaclass=ComponentABCMeta):
         self._context: Context = Context()
 
     @abstractmethod
-    def _generate(self, messages: List[dict[str, str]], **kwargs) -> Any:
+    def _generate(self, messages: List[Dict[str, Any]], **kwargs) -> Any:
         """Generates content based on formatted messages.
 
         This abstract method must be implemented by subclasses to define the
         specific content generation logic for each LLM type.
 
         Args:
-            messages (List[dict[str, str]]): A list of message dictionaries,
-                each containing 'role' and 'content' keys.
+            messages (List[Dict[str, Any]]): A list of message dictionaries,
+                each containing at least 'role' and 'content' keys. The
+                'content' field may be a string or a list of multimodal
+                content blocks, depending on the underlying LLM.
             **kwargs: Additional keyword arguments for model-specific parameters.
 
         Returns:
@@ -62,7 +64,7 @@ class BaseLLM(ExportConfigMixin, metaclass=ComponentABCMeta):
 
     def generate(
             self,
-            messages: List[dict[str, str]],
+            messages: List[Dict[str, Any]],
             tracer: Tracer = None,
             callbacks: BaseCallback | List[BaseCallback] = None,
             **kwargs
@@ -74,8 +76,10 @@ class BaseLLM(ExportConfigMixin, metaclass=ComponentABCMeta):
         and error handling.
 
         Args:
-            messages (List[dict[str, str]]): A list of message dictionaries,
-                each containing 'role' and 'content' keys.
+            messages (List[Dict[str, Any]]): A list of message dictionaries,
+                each containing at least 'role' and 'content' keys. The
+                'content' field may be a string or a list of multimodal
+                content blocks, depending on the underlying LLM.
             tracer (Tracer, optional): Tracer object for tracking model outputs.
                 If None, a new Tracer will be created.
             callbacks (BaseCallback | List[BaseCallback], optional):
@@ -184,7 +188,7 @@ class BaseLLM(ExportConfigMixin, metaclass=ComponentABCMeta):
 
     async def _call_generate(
             self,
-            messages: List[dict[str, str]],
+            messages: List[Dict[str, Any]],
             tracer: Tracer = None,
             callbacks: BaseCallback | List[BaseCallback] = None,
             **kwargs
@@ -197,7 +201,7 @@ class BaseLLM(ExportConfigMixin, metaclass=ComponentABCMeta):
 
     async def generate_async(
             self,
-            messages: List[dict[str, str]] = None,
+            messages: List[Dict[str, Any]] = None,
             tracer: Tracer = None,
             callbacks: BaseCallback | List[BaseCallback] = None,
             **kwargs
@@ -206,8 +210,10 @@ class BaseLLM(ExportConfigMixin, metaclass=ComponentABCMeta):
         Asynchronously generates content based on formatted messages with tracing support.
 
         Args:
-            messages (List[dict[str, str]]): A list of message dictionaries,
-                each containing 'role' and 'content' keys.
+            messages (List[Dict[str, Any]]): A list of message dictionaries,
+                each containing at least 'role' and 'content' keys. The
+                'content' field may be a string or a list of multimodal
+                content blocks.
             tracer (Tracer, optional): Tracer object for tracking model outputs.
                 If None, a new Tracer will be created.
             callbacks (BaseCallback | List[BaseCallback], optional):

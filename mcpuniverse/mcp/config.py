@@ -71,10 +71,13 @@ class ServerConfig(BaseConfig):
     Attributes:
         stdio (CommandConfig): Configuration for standard I/O command.
         sse (CommandConfig): Configuration for SSE command.
+        sse_address (Optional[str]): Direct SSE URL address (for containerized servers).
+            If provided, this URL will be used directly instead of constructing from gateway.
         env (Dict): Dictionary of environment variables.
     """
     stdio: CommandConfig = field(default_factory=CommandConfig)
     sse: CommandConfig = field(default_factory=CommandConfig)
+    sse_address: Optional[str] = None
     env: Dict = field(default_factory=dict)
 
     def render_template(self, params: Optional[Dict] = None):

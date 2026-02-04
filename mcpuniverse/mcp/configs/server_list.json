@@ -204,6 +204,23 @@
     }
   },
 
+  "media_tools": {
+    "stdio": {
+      "command": "python3",
+      "args": [
+        "-m", "mcpuniverse.mcp.servers.media_tools"
+      ]
+    },
+    "sse": {
+      "command": "python3",
+      "args": [
+        "-m", "mcpuniverse.mcp.servers.media_tools",
+        "--transport", "sse",
+        "--port", "{{PORT}}"
+      ]
+    }
+  },
+
   "slack": {
     "stdio": {
       "command": "npx",

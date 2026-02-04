@@ -85,16 +85,33 @@ class BasicAgent(BaseAgent):
             tools=None,
             **params
         )
+
+        # Optional multimodal content blocks supplied by caller.
+        # Each block should follow the provider's expected schema, e.g.:
+        #   {"type": "image_url", "image_url": {"url": "..."}}
+        media_blocks = kwargs.pop("media_blocks", None)
+
+        # Preserve original behaviour for text-only inputs.
         if isinstance(message, (list, tuple)):
             message = "\n".join(message)
         if output_format is not None:
             message = message + "\n\n" + self._get_output_format_prompt(output_format)
+
+        # Build user content: string for legacy, or multimodal blocks when provided.
+        if media_blocks:
+            # Ensure media_blocks is a list
+            if not isinstance(media_blocks, (list, tuple)):
+                media_blocks = [media_blocks]
+            user_content = [{"type": "text", "text": message}, *media_blocks]
+        else:
+            user_content = message
+
         tracer = kwargs.get("tracer", Tracer())
         callbacks = kwargs.get("callbacks", [])
 
         response = await self._llm.generate_async(
             messages=[{"role": "system", "content": prompt},
-                      {"role": "user", "content": message}],
+                      {"role": "user", "content": user_content}],
             tracer=tracer,
             callbacks=callbacks,
             remote_mcp=self.get_remote_mcp_list()

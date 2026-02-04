@@ -77,6 +77,9 @@ class ReAct(BaseAgent):
         super().__init__(mcp_manager=mcp_manager, llm=llm, config=config)
         self._logger = get_logger(f"{self.__class__.__name__}:{self._name}")
         self._history: List[str] = []
+        # Store multimodal content blocks accumulated from tool calls, e.g.
+        # image/video urls from the media_tools server.
+        self._media_blocks: List[Dict] = []
 
     def _build_prompt(self, question: str):
         """
@@ -135,6 +138,9 @@ class ReAct(BaseAgent):
         Returns:
             AgentResponse: The agent's final response, including the answer and trace information.
         """
+        # Reset multimodal blocks for each new execution
+        self._media_blocks = []
+
         if isinstance(message, (list, tuple)):
             message = "\n".join(message)
         if output_format is not None:
@@ -144,11 +150,37 @@ class ReAct(BaseAgent):
 
         for iter_num in range(self._config.max_iterations):
             prompt = self._build_prompt(message)
+
+            # If we have accumulated multimodal blocks (e.g. from media_tools),
+            # send them together with the textual prompt as a multimodal message.
+            if self._media_blocks:
+                user_content = [{"type": "text", "text": prompt}, *self._media_blocks]
+            else:
+                user_content = prompt
+
             response = await self._llm.generate_async(
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": user_content}],
                 tracer=tracer,
                 callbacks=callbacks
             )
+            # If LLM returns None (e.g. non-retryable error in the LLM layer),
+            # treat this as an unrecoverable step error instead of calling .strip()
+            # on None and crashing the loop.
+            if response is None:
+                self._logger.error("LLM returned None response; aborting ReAct loop for this task.")
+                self._add_history(
+                    history_type="error",
+                    message="The language model failed to produce a response. Please check LLM logs."
+                )
+                send_message(callbacks, message=CallbackMessage(
+                    source=__file__,
+                    type=MessageType.LOG,
+                    data={
+                        "step": iter_num + 1,
+                        "error": "LLM returned None response; aborting."
+                    }
+                ))
+                break
             try:
                 response = response.strip().strip('`').strip()
                 if response.startswith("json"):
@@ -220,6 +252,27 @@ class ReAct(BaseAgent):
                                 self._add_history(history_type="result", message=tool_content.text)
 
                             result = tool_summary if tool_summary else tool_content.text
+
+                            # If the tool is from the media_tools server, try to
+                            # convert its JSON output into multimodal blocks.
+                            if action.get("server") == "media_tools":
+                                try:
+                                    media_info = json.loads(tool_content.text)
+                                except json.JSONDecodeError:
+                                    media_info = None
+                                if isinstance(media_info, dict) and media_info.get("ok") and media_info.get("url"):
+                                    url = media_info["url"]
+                                    if action.get("tool") == "read_image":
+                                        # Standard image_url block used by many vision APIs
+                                        self._media_blocks.append(
+                                            {"type": "image_url", "image_url": {"url": url}}
+                                        )
+                                    elif action.get("tool") == "watch_video":
+                                        # Non-standard block; can be adapted by specific LLM backends
+                                        self._media_blocks.append(
+                                            {"type": "video_url", "video_url": {"url": url}}
+                                        )
+
                             await self._send_callback_message(
                                 callbacks=callbacks,
                                 iter_num=iter_num,
