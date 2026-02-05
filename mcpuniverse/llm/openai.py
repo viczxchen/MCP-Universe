@@ -127,7 +127,8 @@ class OpenAIModel(BaseLLM):
 
         for attempt in range(max_retries + 1):
             try:
-                client = OpenAI(api_key=self.config.api_key,base_url="https://api.agicto.cn/v1")
+                # client = OpenAI(api_key=self.config.api_key,base_url="https://api.agicto.cn/v1")
+                client = OpenAI(api_key=self.config.api_key)
                 # Models support the 'reasoning_effort' parameter.
                 # This set can be extended as new models are introduced.
                 _models_with_reasoning_effort_support = {"gpt-5", "o3", "o4-mini", "gpt-5-high"}
