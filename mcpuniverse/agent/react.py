@@ -154,6 +154,11 @@ class ReAct(BaseAgent):
             # If we have accumulated multimodal blocks (e.g. from media_tools),
             # send them together with the textual prompt as a multimodal message.
             if self._media_blocks:
+                # Add a note to tell the model that images are now visible
+                num_images = len([b for b in self._media_blocks if b.get("type") == "image_url"])
+                if num_images > 0:
+                    image_note = f"\n\n[SYSTEM NOTE: {num_images} image(s) from your previous read_image/read_images call are now displayed. Analyze the visual content directly - do NOT call read_image again for the same file.]"
+                    prompt = prompt + image_note
                 user_content = [{"type": "text", "text": prompt}, *self._media_blocks]
             else:
                 user_content = prompt
@@ -163,6 +168,12 @@ class ReAct(BaseAgent):
                 tracer=tracer,
                 callbacks=callbacks
             )
+            
+            # Clear media blocks after sending to avoid re-sending the same images
+            # in subsequent iterations (which would waste tokens).
+            # The model has already "seen" these images in this call.
+            self._media_blocks = []
+            
             # If LLM returns None (e.g. non-retryable error in the LLM layer),
             # treat this as an unrecoverable step error instead of calling .strip()
             # on None and crashing the loop.
@@ -260,18 +271,28 @@ class ReAct(BaseAgent):
                                     media_info = json.loads(tool_content.text)
                                 except json.JSONDecodeError:
                                     media_info = None
+                                
+                                tool_name = action.get("tool", "")
+                                
+                                # Handle read_image (single) - returns dict
                                 if isinstance(media_info, dict) and media_info.get("ok") and media_info.get("url"):
                                     url = media_info["url"]
-                                    if action.get("tool") == "read_image":
-                                        # Standard image_url block used by many vision APIs
+                                    if tool_name in ("read_image", "read_images"):
                                         self._media_blocks.append(
                                             {"type": "image_url", "image_url": {"url": url}}
                                         )
-                                    elif action.get("tool") == "watch_video":
-                                        # Non-standard block; can be adapted by specific LLM backends
+                                    elif tool_name == "watch_video":
                                         self._media_blocks.append(
                                             {"type": "video_url", "video_url": {"url": url}}
                                         )
+                                
+                                # Handle read_images (plural) - returns list of dicts
+                                elif isinstance(media_info, list) and tool_name == "read_images":
+                                    for item in media_info:
+                                        if isinstance(item, dict) and item.get("ok") and item.get("url"):
+                                            self._media_blocks.append(
+                                                {"type": "image_url", "image_url": {"url": item["url"]}}
+                                            )
 
                             await self._send_callback_message(
                                 callbacks=callbacks,

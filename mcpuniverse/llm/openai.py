@@ -110,6 +110,17 @@ class OpenAIModel(BaseLLM):
         container_path_mapping = None
         if self._context:
             container_path_mapping = self._context.metadata.get("container_path_mapping")
+        
+        # Debug: log multimodal message details
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if block.get("type") == "image_url":
+                        url = block.get("image_url", {}).get("url", "")
+                        logging.info(f"[OpenAIModel] Found image_url block: {url[:80]}...")
+                        logging.info(f"[OpenAIModel] container_path_mapping: {container_path_mapping}")
+        
         normalized_messages = self._normalize_messages_with_local_images(
             messages, container_path_mapping=container_path_mapping
         )
@@ -241,6 +252,7 @@ class OpenAIModel(BaseLLM):
                                             host_path = Path(host_prefix) / relative_path
                                             break
                                 
+                                logging.info(f"[OpenAIModel] Checking host_path: {host_path}, exists: {host_path.exists()}")
                                 if host_path.exists():
                                     mime, _ = mimetypes.guess_type(str(host_path))
                                     if not mime:
@@ -249,11 +261,14 @@ class OpenAIModel(BaseLLM):
                                         import base64
                                         b64 = base64.b64encode(f.read()).decode("ascii")
                                     data_uri = f"data:{mime};base64,{b64}"
+                                    logging.info(f"[OpenAIModel] Converted {url} to base64 data URI (len={len(data_uri)})")
                                     # Update URL to data URI so that OpenAI can see the image
                                     if isinstance(image_url, dict):
                                         image_url = dict(image_url)
                                         image_url["url"] = data_uri
                                         block_copy["image_url"] = image_url
+                                else:
+                                    logging.warning(f"[OpenAIModel] Host path does not exist: {host_path}")
                             except Exception as exc:  # pragma: no cover - defensive
                                 logging.warning("Failed to convert local image %s to data URI: %s", url, exc)
                     new_blocks.append(block_copy)
